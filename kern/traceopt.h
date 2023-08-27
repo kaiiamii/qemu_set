@@ -43,7 +43,7 @@
 #endif
 
 #ifndef trace_spinlock
-#define trace_spinlock 0
+#define trace_spinlock 1
 #endif
 
 #ifndef trace_init
