@@ -65,6 +65,8 @@ debuginfo_rip(uintptr_t addr, struct Ripdebuginfo *info) {
      * Hint: note that we need the address of `call` instruction, but rip holds
      * address of the next instruction, so we should substract 5 from it.
      * Hint: use line_for_address from kern/dwarf_lines.c */
+    res = line_for_address(&addrs, addr - CALL_INSN_LEN, line_offset, &info->rip_line);
+    if (res < 0) goto error;
 
     // LAB 2: Your res here:
 
@@ -76,6 +78,10 @@ debuginfo_rip(uintptr_t addr, struct Ripdebuginfo *info) {
      * string returned by function_by_info will always be */
 
     // LAB 2: Your res here:
+    res = function_by_info(&addrs, addr - 5, offset, &tmp_buf, &info->rip_fn_addr);
+    if (res < 0) return 0;;
+    strncpy(info->rip_fn_name, tmp_buf, sizeof(info->rip_fn_name));
+    info->rip_fn_namelen = strnlen(info->rip_fn_name, sizeof(info->rip_fn_name));
 
 error:
     return res;
@@ -90,6 +96,26 @@ find_function(const char *const fname) {
      * in assembly. */
 
     // LAB 3: Your code here:
+    LOADER_PARAMS* lp = (LOADER_PARAMS *) uefi_lp;
+    struct Elf64_Sym *symtab = (struct Elf64_Sym *)lp->SymbolTableStart;
+    struct Elf64_Sym *symtab_end = (struct Elf64_Sym *)lp->SymbolTableEnd;
+    char *strtab = (char *)lp->StringTableStart;
 
+    for (struct Elf64_Sym *iter = symtab; iter < symtab_end; iter++) {
+        if (!strcmp(&strtab[iter->st_name], fname)) {
+            return (uintptr_t)iter->st_value;
+        }
+    }
+
+    struct Dwarf_Addrs addrs;
+    load_kernel_dwarf_info(&addrs);
+    uintptr_t offset = 0;
+
+    if (!address_by_fname(&addrs, fname, &offset))
+        return offset;
+
+    if (!naive_address_by_fname(&addrs, fname, &offset))
+        return offset;
+    
     return 0;
 }
