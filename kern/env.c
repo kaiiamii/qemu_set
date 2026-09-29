@@ -93,9 +93,12 @@ env_init(void) {
     for (int i = NENV - 1; i >= 0; i--) {
         envs[i].env_status = ENV_FREE;
         envs[i].env_id = 0;
+        envs[i].env_parent_id = 0;
+        envs[i].env_runs = 0;
         envs[i].env_link = env_free_list;
         env_free_list = &envs[i];
     }
+    cprintf("env_init: free_list=%p, envs[0]=%p\n", env_free_list, &envs[0]);
 
 }
 
