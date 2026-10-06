@@ -8,7 +8,6 @@
 #include <inc/elf.h>
 
 #include <kern/env.h>
-#include <kern/trap.h>
 #include <kern/monitor.h>
 #include <kern/sched.h>
 #include <kern/kdebug.h>
@@ -90,16 +89,12 @@ env_init(void) {
     /* Set up envs array */
 
     // LAB 3: Your code here
-    env_free_list = NULL;
-    for (int i = NENV - 1; i >= 0; i--) {
-        envs[i].env_status = ENV_FREE;
+    env_free_list = &envs[0];
+    for (size_t i = 0; i < NENV - 1; i++) {
         envs[i].env_id = 0;
-        envs[i].env_parent_id = 0;
-        envs[i].env_runs = 0;
-        envs[i].env_link = env_free_list;
-        env_free_list = &envs[i];
+        envs[i].env_link = &envs[i + 1];
     }
-    cprintf("env_init: free_list=%p, envs[0]=%p\n", env_free_list, &envs[0]);
+    envs[NENV - 1].env_link = NULL;
 
 }
 
@@ -184,50 +179,108 @@ env_alloc(struct Env **newenv_store, envid_t parent_id, enum EnvType type) {
  * Make sure you understand why you need to check that each binding
  * must be performed within the image_start/image_end range.
  */
-static size_t
-find_section(struct Secthdr *sh, char *shstr, size_t shnum, uint32_t type, const char *section_name) {
-    for (size_t i = 0; i < shnum; i++) {
-        struct Secthdr *sh_cur = sh + i;
-        if (sh_cur->sh_type == type && !strcmp(shstr + sh_cur->sh_name, section_name)) {
-            return i;
-        }
-    }
+
+static int 
+elf_region_check(const uint8_t *binary, size_t size, uint64_t off, uint64_t len, size_t align) {
+    if (off > size) 
+        return -1;                          /* начало внутри файла */
+    if (len > size - off) 
+        return -1;                          /* конец внутри файла, без переполнения */
+    if (((uintptr_t)binary + off) % align) 
+        return -1;                          /* выравнивание */
     
     return 0;
 }
+/* вписать в переменные программы адреса реальных функций ядра.*/
 static int
 bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_start, uintptr_t image_end) {
     // LAB 3: Your code here:
 
     /* NOTE: find_function from kdebug.c should be used */
 
-    struct Elf *segments = (struct Elf *)binary;
+    /* Заголовок ELF уже проверен в load_icode */
+    struct Elf *elf = (struct Elf *)binary;
 
-    struct Secthdr *sh = (struct Secthdr *)(binary + segments->e_shoff);
-    char *shstr = (char *)binary + sh[segments->e_shstrndx].sh_offset;
+    /* размер записи в таблице заголовков секций совпадает с размером структуры*/
+    if (elf->e_shentsize != sizeof(struct Secthdr)) 
+        return -E_INVALID_EXE;
+    /*таблица в файле и выровнена*/
+    /*e_shoff смещение от начала файла таблицы секций, e_shnum сколько в ней записей*/
+    if (elf_region_check(binary, size, elf->e_shoff,
+                       (uint64_t)elf->e_shnum * sizeof(struct Secthdr),
+                       _Alignof(struct Secthdr))<0)
+        return -E_INVALID_EXE;
+    /*указатель на массив записей section headers.*/
+    struct Secthdr *sh = (struct Secthdr *)(binary + elf->e_shoff); /*указатель на тыблицу секций*/
+    /*роходим по всем записям таблицы секций*/
+    for (size_t i = 0; i < elf->e_shnum; i++) {
+        /*пропускаем все что не таблица символов*/
+        if (sh[i].sh_type != ELF_SHT_SYMTAB)    
+            continue;
 
-    size_t strtab_section_num = find_section(sh, shstr, segments->e_shnum, ELF_SHT_STRTAB, ".strtab");
+        /* Таблица символов */
+        /*размер записей совпадает и размер секции делится на размер записи*/
+        if (sh[i].sh_entsize != sizeof(struct Elf64_Sym) ||
+            sh[i].sh_size % sizeof(struct Elf64_Sym))
+            return -E_INVALID_EXE;
+        /*вся таблица символов лежит внутри файла*/
+        if (elf_region_check(binary, size, sh[i].sh_offset, sh[i].sh_size,
+                           _Alignof(struct Elf64_Sym))<0)
+            return -E_INVALID_EXE;
 
-    char *names = (char *)binary + sh[strtab_section_num].sh_offset;
+        /* Связанная с ней таблица строк и ее индекс не выходит за пределы таблицы секций*/
+        if (sh[i].sh_link >= elf->e_shnum)
+            return -E_INVALID_EXE;
+        /*описание таблицы строк*/
+        struct Secthdr *str_sh = &sh[sh[i].sh_link];
+        /*SHT_STRTAB — иначе это не таблица строк,  и не пустая желательно*/
+        if (str_sh->sh_type != ELF_SHT_STRTAB || str_sh->sh_size == 0)
+            return -E_INVALID_EXE;
+        /*вся таблица строк лежит внутри файла*/
+        if (elf_region_check(binary, size, str_sh->sh_offset, str_sh->sh_size, 1)<0)
+            return -E_INVALID_EXE;
+        /* туказательна на таблицу строк переводим в в чар чтобы потом читать  посимвольно*/
+        const char *strtab = (const char *)(binary + str_sh->sh_offset);    
+        /* Последний байт — ноль, значит любая строка внутри таблицы заканчивается внутри неё */
+        if (strtab[str_sh->sh_size - 1] != '\0')
+            return -E_INVALID_EXE;
+         /*binary +(сsh[i].sh_offset-смещение таблицы символов) - адрес первого байта таблицы символов*/
+        struct Elf64_Sym *syms = (struct Elf64_Sym *)(binary + sh[i].sh_offset);   
+        /*колличество символов в таблице*/
+        size_t nsyms = sh[i].sh_size / sizeof(struct Elf64_Sym);    /*сколько записей*/
 
-    size_t symtab_section_num = find_section(sh, shstr, segments->e_shnum, ELF_SHT_SYMTAB, ".symtab");
+        for (size_t j = 0; j < nsyms; j++) {
+            /*st_info — это один байт, младшие 4 вид, старшие видимость*/
+            if (ELF64_ST_BIND(syms[j].st_info) != STB_GLOBAL ||
+                ELF64_ST_TYPE(syms[j].st_info) != STT_OBJECT)
+                continue;
+            /*смещение таблицы строк может выходить за пределы таблицы*/
+            if (syms[j].st_name >= str_sh->sh_size)
+                continue;
 
-    struct Elf64_Sym *symbols = (struct Elf64_Sym *)(binary + sh[symtab_section_num].sh_offset);
-    size_t symbols_cnt = sh[symtab_section_num].sh_size / sizeof(*symbols);
-
-    for (size_t i = 0; i < symbols_cnt; i++) {
-        struct Elf64_Sym *symbol = &symbols[i];
-        if (ELF64_ST_BIND(symbol->st_info) == STB_GLOBAL &&
-            ELF64_ST_TYPE(symbol->st_info) == STT_OBJECT &&
-            symbol->st_size == sizeof(void *)) {
-            char *name = names + symbol->st_name;
+            const char *name = strtab + syms[j].st_name;
+            /*ищет в таблице символов ядра функцию с заданным именем и возвращает её адрес.*/
             uintptr_t addr = find_function(name);
-            if (addr && symbol->st_value >= image_start && symbol->st_value <= image_end) {
-                *((uintptr_t *)symbol->st_value) = addr;
-            }
+            if (!addr)
+                continue;
+            /*st_value — это адрес переменной в образе программы.*/
+            uintptr_t var_addr = syms[j].st_value;
+
+            /*(void (*)(void)) — это тип «указатель на функцию, принимающую ничего (void) 
+            *и возвращающую ничего (void)*/
+            /* Получили именно указатель на функцию */
+            void (*func)(void) = (void (*)(void))addr;
+
+            /* Проверяем только, что запись лежит внутри образа */
+            if (var_addr < image_start ||
+                var_addr >= image_end ||
+                image_end - var_addr < sizeof(func))
+                return -E_INVALID_EXE;
+
+            /* Копируем сам указатель на функцию */
+            memcpy((void *)var_addr, &func, sizeof(func));
         }
     }
-
     return 0;
 }
 
@@ -271,73 +324,122 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
  *   You must also do something with the program's entry point,
  *   to make sure that the environment starts executing there.
  *   What?  (See env_run() and env_pop_tf() below.) */
+
+/*Функция берёт binary, разбирает ELF-файл, 
+ * копирует код и данные программы по нужным адресам и записывает в env_tf.tf_rip точку входа e_entry, 
+ * чтобы процесс знал, откуда начинать.*/
 static int
 load_icode(struct Env *env, uint8_t *binary, size_t size) {
     // LAB 3: Your code here
-    struct Elf *elf = (struct Elf *) binary;
-    if (elf->e_magic != ELF_MAGIC) {
-        cprintf("Incorrect format of ELF file");
+    /* проверка elf- заголовка */
+     if (binary == NULL) 
         return -E_INVALID_EXE;
-    }
 
-    if (elf->e_shentsize != sizeof (struct Secthdr)) {
-        cprintf("Incorrect section size");
+    /* проверяем, что заголовок ELF целиком помещается в буфер и выровнен */        
+    if (elf_region_check(binary, size, 0, sizeof(struct Elf), _Alignof(struct Elf))<0)
         return -E_INVALID_EXE;
-    }
 
-    if (elf->e_shstrndx >= elf->e_shnum) {
-        cprintf("Incorrect index of string section");
+    /*чтобы обращаться как к заголовоку а не через смещение*/
+    struct Elf *elf = (struct Elf *)binary; 
+    /*проверка на elf*/
+    if (elf->e_magic != ELF_MAGIC)  
         return -E_INVALID_EXE;
-    }
 
-    if (elf->e_phentsize != sizeof (struct Proghdr)) {
-        cprintf("Incorrect size of program headers");
+    /* проверяем, что файл 64-битный */
+    if (elf->e_elf[EI_CLASS] != ELFCLASS64)
         return -E_INVALID_EXE;
-    }
 
-#ifdef CONFIG_KSPACE
-    uintptr_t image_start = 0;
-    bool start_set = 0;
-    uintptr_t image_end = 0;
-#endif
+     /* проверяем, что данные в little-endian (x86 — little-endian) */
+    if (elf->e_elf[EI_DATA] != ELFDATA2LSB)
+        return -E_INVALID_EXE;
 
-    struct Proghdr *ph_array = (struct Proghdr *)(binary + elf->e_phoff);
+    /* проверяем версию ELF: и в e_ident, и в e_version — обе должны быть EV_CURRENT */
+    if ((elf->e_elf[EI_VERSION] != EV_CURRENT) ||
+        (elf->e_version != EV_CURRENT))
+        return -E_INVALID_EXE;
+    
+    /* проверяем тип: JOS загружает только ET_EXEC (готовый к запуску) */
+    if (elf->e_type != ET_EXEC)
+        return -E_INVALID_EXE;
+
+     /* проверяем архитектуру: должна быть x86-64 */
+    if (elf->e_machine != EM_X86_64)
+        return -E_INVALID_EXE;
+
+     /* проверяем, что размер заголовка совпадает с sizeof(struct Elf) */
+    if (elf->e_ehsize != sizeof(struct Elf))
+        return -E_INVALID_EXE;
+
+
+
+                            /* Proghdr check */
+
+    /* проверяем, что размер одной записи program header совпадает с sizeof(struct Proghdr) */
+    if (elf->e_phentsize != sizeof(struct Proghdr))
+        return -E_INVALID_EXE;
+
+    /* проверяем, что таблица program headers не перекрывается с ELF-заголовком */
+    if (elf->e_phoff < elf->e_ehsize)
+        return -E_INVALID_EXE;
+
+    /*Таблица сегментов начинается с e_phoff, e_phnum количество сегментов*/
+    if (elf_region_check(binary, size, elf->e_phoff,
+                       (uint64_t)elf->e_phnum * sizeof(struct Proghdr),
+                       _Alignof(struct Proghdr))<0)   /*проверка границ и выравнивание*/
+        return -E_INVALID_EXE;
+    /*указатель массив записей в таблице смещений*/
+    struct Proghdr *ph = (struct Proghdr *)(binary + elf->e_phoff); 
+    /*инициализация границ образа-потом проверим что адрес переменной в этих границах*/
+    uintptr_t image_start = UINTPTR_MAX, image_end = 0;
+
     for (size_t i = 0; i < elf->e_phnum; i++) {
-        struct Proghdr *ph = ph_array + i;
-        if (ph->p_type != ELF_PROG_LOAD)
+        if (ph[i].p_type != ELF_PROG_LOAD)
             continue;
-
-        void *src = binary + ph->p_offset;
-        void *dst = (void *)(ph->p_va);
-
-        if (ph->p_filesz > ph->p_memsz) {
-            cprintf("Incorrect filesz of a section");
+        /*данных в файле не более чем в памяти*/
+        if (ph[i].p_filesz > ph[i].p_memsz)
             return -E_INVALID_EXE;
-        }
 
-        if (src + ph->p_filesz > (void *)binary + size || src < (void *)binary)
-            continue;
+        /* проверяем, что p_align — степень двойки */
+        if ((ph[i].p_align & (ph[i].p_align - 1)) != 0)
+            return -E_INVALID_EXE;
 
-#ifdef CONFIG_KSPACE
-        if (!start_set || (uintptr_t) dst < image_start) {
-            image_start = (uintptr_t) dst;
-            start_set = 1;
-        }
-        if (image_end < (uintptr_t)(dst + ph->p_memsz))
-            image_end = (uintptr_t)(dst + ph->p_memsz);
-#endif
+        /* проверяем, что offset и vaddr согласованы по модулю p_align (требование ELF) */
+        if (ph[i].p_offset % ph[i].p_align != ph[i].p_va % ph[i].p_align)
+            return -E_INVALID_EXE;
 
-        memcpy(dst, src, ph->p_filesz);
-        memset(dst + ph->p_filesz, 0, ph->p_memsz - ph->p_filesz);
+
+        /* Данные сегмента целиком внутри файла */
+        /*p_offset	смещение сегмента в файле, p_filesz	размер сегмента в файле*/
+        if (elf_region_check(binary, size, ph[i].p_offset, ph[i].p_filesz, 1)<0)
+            return -E_INVALID_EXE;
+
+        // Check for valid virtual address
+        if (ph[i].p_va > MAX_USER_READABLE)
+            return -E_INVALID_EXE;
+
+        /* p_va + p_memsz не переполняется */
+        /*p_memsz	размер сегмента в памяти, p_va	адрес в памяти, куда положить сегмент*/
+        if (ph[i].p_memsz > UINTPTR_MAX - ph[i].p_va)
+            return -E_INVALID_EXE;
+        /*кладем сегмент в память, зануляем хвост сегмента*/
+        memcpy((void *)ph[i].p_va, binary + ph[i].p_offset, ph[i].p_filesz);
+        memset((void *)(ph[i].p_va + ph[i].p_filesz), 0, ph[i].p_memsz - ph[i].p_filesz);
+
+        /* обновляем минимальный и максимальный адрес среди наших сегментов*/
+        if (ph[i].p_va < image_start) image_start = ph[i].p_va;
+        if (ph[i].p_va + ph[i].p_memsz > image_end) image_end = ph[i].p_va + ph[i].p_memsz;
     }
 
+    /* Должен быть хотя бы один загружаемый сегмент,
+     * и точка входа должна указывать внутрь загруженной программы */
+    if (image_start >= image_end)
+        return -E_INVALID_EXE;
+    if (elf->e_entry < image_start || elf->e_entry >= image_end)
+        return -E_INVALID_EXE;
+    /* записываем точку входа в trapframe щкружение*/
     env->env_tf.tf_rip = elf->e_entry;
 
-#ifdef CONFIG_KSPACE
-    bind_functions(env, binary, size, image_start, image_end);
-#endif
-
-    return 0;
+    return bind_functions(env, binary, size, image_start, image_end);
 }
 
 /* Allocates a new env with env_alloc, loads the named elf
@@ -412,6 +514,14 @@ csys_yield(struct Trapframe *tf) {
 
 _Noreturn void
 env_pop_tf(struct Trapframe *tf) {
+
+    /* Push RIP on program stack */
+    tf->tf_rsp -= sizeof(uintptr_t);
+    *((uintptr_t *)tf->tf_rsp) = tf->tf_rip;
+    /* Push RFLAGS on program stack */
+    tf->tf_rsp -= sizeof(uintptr_t);
+    *((uintptr_t *)tf->tf_rsp) = tf->tf_rflags;
+
     asm volatile(
             "movq %0, %%rsp\n"
             "movq 0(%%rsp), %%r15\n"
@@ -429,10 +539,8 @@ env_pop_tf(struct Trapframe *tf) {
             "movq 96(%%rsp), %%rcx\n"
             "movq 104(%%rsp), %%rbx\n"
             "movq 112(%%rsp), %%rax\n"
-            "movw 120(%%rsp), %%es\n"
-            "movw 128(%%rsp), %%ds\n"
-            "addq $152,%%rsp\n" /* skip tf_trapno and tf_errcode */
-            "iretq" ::"g"(tf)
+            "movq (128+48)(%%rsp), %%rsp\n"
+            "popfq; ret" ::"g"(tf)
             : "memory");
 
     /* Mostly to placate the compiler */
@@ -485,7 +593,7 @@ env_run(struct Env *env) {
 
 
     env_pop_tf(&curenv->env_tf);
-
+    
     while (1)
         ;
 }

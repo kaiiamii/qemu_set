@@ -59,33 +59,62 @@ struct Elf64_Sym {
   UINT64            st_size;
 };
 
+/* Addresses for e_elf array */
+#define EI_CLASS          0       /* File class */ 
+#define EI_DATA           1       /* Data encoding */
+#define EI_VERSION        2       /* File version */
+#define EI_OSABI          3       /* OS/ABI identification */
+#define EI_ABIVERSION     4       /* ABI version */
+#define EI_PAD            5       /* Start of padding bytes */
+#define EI_NIDENT         12      /* Size of e_elf[] */
+
+/* Values for EI_CLASS */
+#define ELFCLASS32        1       /* 32-bit objects */
+#define ELFCLASS64        2       /* 64-bit objects */
+
+/* Values for EI_DATA */
+#define ELFDATA2LSB       1       /* Object file data structures are little-endian */
+#define ELFDATA2MSB       2       /* Object file data structures are big-endian */
+
+/* Values for EI_OSABI */
+#define ELFOSABI_SYSV       0       /* System V ABI */
+#define ELFOSABI_HPUX       1       /* HP-UX operating system */
+#define ELFOSABI_STANDALONE 255     /* Standalone (embedded) application */
+
 /* Values for e_type. */
-#define ET_NONE    0  /* Unknown type. */
-#define ET_REL    1  /* Relocatable. */
-#define ET_EXEC    2  /* Executable. */
-#define ET_DYN    3  /* Shared object. */
-#define ET_CORE    4  /* Core file. */
-#define ET_LOOS    0xfe00  /* First operating system specific. */
-#define ET_HIOS    0xfeff  /* Last operating system-specific. */
-#define ET_LOPROC  0xff00  /* First processor-specific. */
-#define ET_HIPROC  0xffff  /* Last processor-specific. */
+#define ET_NONE           0         /* Unknown type. */
+#define ET_REL            1         /* Relocatable. */
+#define ET_EXEC           2         /* Executable. */
+#define ET_DYN            3         /* Shared object. */
+#define ET_CORE           4         /* Core file. */
+#define ET_LOOS           0xfe00    /* First operating system specific. */
+#define ET_HIOS           0xfeff    /* Last operating system-specific. */
+#define ET_LOPROC         0xff00    /* First processor-specific. */
+#define ET_HIPROC         0xffff    /* Last processor-specific. */
 
 /* Values for e_machine. */
-#define EM_X86_64  62  /* Advanced Micro Devices x86-64 */
-#define EM_AMD64  EM_X86_64  /* Advanced Micro Devices x86-64 (compat) */
+#define EM_X86_64         62        /* Advanced Micro Devices x86-64 */
+#define EM_AMD64          EM_X86_64 /* Advanced Micro Devices x86-64 (compat) */
+
+/* Values for e_version */
+#define EV_CURRENT        1         /* The version of the object file format */
+
+/* Values for alignment */
+#define DEFAULT_ALIGN     1
+
 
 /* Symbol Binding - ELFNN_ST_BIND - st_info */
-#define STB_LOCAL  0  /* Local symbol */
-#define STB_GLOBAL  1  /* Global symbol */
-#define STB_WEAK  2  /* like global - lower precedence */
-#define STB_LOOS  10  /* Reserved range for operating system */
-#define STB_HIOS  12  /*   specific semantics. */
-#define STB_LOPROC  13  /* reserved range for processor */
-#define STB_HIPROC  15  /*   specific semantics. */
+#define STB_LOCAL         0       /* Local symbol */
+#define STB_GLOBAL        1       /* Global symbol */
+#define STB_WEAK          2       /* like global - lower precedence */
+#define STB_LOOS          10      /* Reserved range for operating system */
+#define STB_HIOS          12      /*   specific semantics. */
+#define STB_LOPROC        13      /* reserved range for processor */
+#define STB_HIPROC        15      /*   specific semantics. */
 
 /* Symbol type - ELFNN_ST_TYPE - st_info */
-#define STT_NOTYPE  0  /* Unspecified type. */
-#define STT_OBJECT  1  /* Data object. */
+#define STT_NOTYPE        0       /* Unspecified type. */
+#define STT_OBJECT        1       /* Data object. */
 #define STT_FUNC  2  /* Function. */
 #define STT_SECTION  3  /* Section. */
 #define STT_FILE  4  /* Source file. */
