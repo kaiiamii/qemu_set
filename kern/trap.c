@@ -3,6 +3,7 @@
 #include <inc/assert.h>
 #include <inc/string.h>
 
+#include <kern/pmap.h>
 #include <kern/trap.h>
 #include <kern/console.h>
 #include <kern/monitor.h>
@@ -55,7 +56,7 @@ struct Segdesc32 gdt[2 * NCPU + 7] = {
         /* 0x30 - user data segment */
         [GD_UD >> 3] = SEG64(STA_W, 0x0, 0xFFFFFFFF, 3),
         /* Per-CPU TSS descriptors (starting from GD_TSS0) are initialized
-         * in trap_init_percpu() */
+     * in trap_init_percpu() */
         [GD_TSS0 >> 3] = SEG_NULL,
         [(GD_TSS0 >> 3) + 1] = SEG_NULL, /* last 8 bytes of the tss since tss is 16 bytes long */
 };
@@ -92,6 +93,7 @@ trapname(int trapno) {
 
     return "(unknown trap)";
 }
+
 void clock_thdlr(void);
 void timer_thdlr(void);
 
@@ -101,6 +103,7 @@ trap_init(void) {
     idt[IRQ_OFFSET + IRQ_CLOCK] = GATE(0, GD_KT, clock_thdlr, 0);
     // LAB 5: Your code here
     idt[IRQ_OFFSET + IRQ_TIMER] = GATE(0, GD_KT, timer_thdlr, 0);
+
     /* Per-CPU setup */
     trap_init_percpu();
 }
@@ -215,12 +218,11 @@ trap_dispatch(struct Trapframe *tf) {
             print_trapframe(tf);
         }
         return;
-    case IRQ_OFFSET + IRQ_CLOCK:
     case IRQ_OFFSET + IRQ_TIMER:
-        // LAB 4: Your code here
+    case IRQ_OFFSET + IRQ_CLOCK:
+        // LAB 5: Your code here
         timer_for_schedule->handle_interrupts();
         sched_yield();
-        // LAB 5: Your code here
         return;
     default:
         print_trapframe(tf);

@@ -10,6 +10,7 @@
 
 #include <kern/console.h>
 #include <kern/picirq.h>
+#include <kern/pmap.h>
 
 #define COM1 0x3F8
 

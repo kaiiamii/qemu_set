@@ -9,6 +9,7 @@
 #include <kern/kclock.h>
 #include <kern/picirq.h>
 #include <kern/trap.h>
+#include <kern/pmap.h>
 
 #define kilo      (1000ULL)
 #define Mega      (kilo * kilo)
@@ -86,73 +87,78 @@ acpi_find_table(const char *sign) {
      * HINT: RSDP address is stored in uefi_lp->ACPIRoot
      * HINT: You may want to distunguish RSDT/XSDT
      */
-    // LAB 5: Your code here:
-    static RSDT *rsdt;
-    static size_t rsdt_len;
-    static size_t rsdt_entsz;
-    uint64_t rsdt_pa;
-    size_t i = 0;
-    uint8_t err = 0;
-    uint64_t fadt_pa = 0;
+
+    // LAB 5: Your code here
+    static RSDT *rsdt = 0;
+    static bool isXSDT = 0;
+
     if (!rsdt) {
-        if (!uefi_lp->ACPIRoot) {
-            panic("No rsdp\n");
-        }
-        RSDP *rsdp = mmio_map_region(uefi_lp->ACPIRoot, sizeof(RSDP));
-        if (!rsdp->Revision) {
-            for (i = 0; i < offsetof(RSDP, Length); i++) {
-                err += ((uint8_t *)rsdp)[i];
-            }
-            if (err) {
-                panic("Invalid RSDP\n");
-            }
-            rsdt_pa = rsdp->RsdtAddress;
-            rsdt_entsz = 4;
+        physaddr_t acpi_phys = uefi_lp->ACPIRoot;
+        RSDP *rsdp = mmio_map_region((physaddr_t)acpi_phys, sizeof(*rsdp));
+
+        /* Validate */
+        if (strncmp(rsdp->Signature, "RSD PTR ", 8))
+            panic("Malformed RSDP");
+
+        physaddr_t rsdt_phys;
+        if (rsdp->Revision) {
+            /* ACPI 2.0 or higher is used */
+            /* Validate checksum of full struct 
+             * Calculate and validate checksum of first and second halfs*/
+            uint8_t checksum = 0;
+            uint8_t *iter;
+            for (iter = (uint8_t *)rsdp; iter < (uint8_t *)&(rsdp->Length); iter++)
+                checksum += *iter;
+
+            if (checksum)
+                panic("Malformed RSDP");
+
+            for (; iter < ((uint8_t *)rsdp + sizeof(*rsdp)); iter++)
+                checksum += *iter;
+
+            if (checksum)
+                panic("Malformed RSDP");
+
+            rsdt_phys = rsdp->XsdtAddress;
+            isXSDT = 1;
         } else {
-            for (i = 0; i < rsdp->Length; i++) {
-                err += ((uint8_t *)rsdp)[i];
-            }
-            if (err) {
-                panic("Invalid RSDP\n");
-            }
-            rsdt_pa = rsdp->XsdtAddress;
-            rsdt_entsz = 8;
+            /* ACPI 1.0 is used */
+            uint8_t checksum = 0;
+            uint8_t *iter;
+            /* Validate checksum of first half of struct */
+            for (iter = (uint8_t *)rsdp; iter < (uint8_t *)&(rsdp->Length); iter++)
+                checksum += *iter;
+
+            if (checksum)
+                panic("Malformed RSDP");
+            rsdt_phys = rsdp->RsdtAddress;
         }
-        rsdt = mmio_map_region(rsdt_pa, sizeof(RSDT));
-        rsdt = mmio_remap_last_region(rsdt_pa, rsdt, sizeof(RSDP), rsdt->h.Length);
-        for (i = 0; i < rsdt->h.Length; i++) {
-            err += ((uint8_t *)rsdt)[i];
-        }
-        if (err) {
-            panic("Invalid RSDP\n");
-        }
-        if (!rsdp->Revision) {
-            if (strncmp(rsdt->h.Signature, "RSDT", 4)) {
-                panic("Invalid RSDT\n");
-            }
-            rsdt_len = (rsdt->h.Length - sizeof(RSDT)) / 4;
-        } else {
-            if (strncmp(rsdt->h.Signature, "XSDT", 4)) {
-                panic("Invalid RSDT\n");
-            }
-            rsdt_len = (rsdt->h.Length - sizeof(RSDT)) / 8;
-        }
+
+        rsdt = mmio_map_region(rsdt_phys, sizeof(RSDT));
+        /* Remap using actual size */
+        rsdt = mmio_map_region(rsdt_phys, rsdt->h.Length);
+
+        /* Validate header checksum */
+        uint8_t checksum = 0;
+ 
+        for (int i = 0; i < rsdt->h.Length; i++)
+            checksum += ((uint8_t *) &rsdt->h)[i];
+        if (checksum)
+                panic("Malformed RSDT header");
     }
-    ACPISDTHeader *head = NULL;
-    for (i = 0; i < rsdt_len; i++) {
-        memcpy(&fadt_pa, (uint8_t *)rsdt->PointerToOtherSDT + i * rsdt_entsz, rsdt_entsz);
-        head = mmio_map_region(fadt_pa, sizeof(ACPISDTHeader));
-        head = mmio_remap_last_region(fadt_pa, head, sizeof(ACPISDTHeader), rsdt->h.Length);
-        for (size_t i = 0; i < head->Length; i++) {
-            err += ((uint8_t *)head)[i];
-        }
-        if (err) {
-            panic("Invalid ACPI table '%.4s'", head->Signature);
-        }
-        if (!strncmp(head->Signature, sign, 4)) {
-            return head;
-        }
+
+    size_t entries_cnt = (rsdt->h.Length - sizeof(ACPISDTHeader)) / (isXSDT ? 8 : 4);
+    for (size_t i = 0; i < entries_cnt; i++) {
+        physaddr_t header_physical = rsdt->PointerToOtherSDT[i];
+        ACPISDTHeader *header = mmio_map_region(header_physical, sizeof(ACPISDTHeader));
+        /* Remap using actual size */
+        header = mmio_map_region(header_physical, header->Length);
+
+        if (!strncmp(header->Signature, sign, 4))
+            return header;
     }
+
+
     return NULL;
 }
 
@@ -163,9 +169,12 @@ get_fadt(void) {
     // (use acpi_find_table)
     // HINT: ACPI table signatures are
     //       not always as their names
-    static FADT *fadt;
-    fadt = acpi_find_table("FACP");
-    return fadt;
+
+    static FADT *kfadt;
+    if (!kfadt)
+        kfadt = acpi_find_table("FACP");
+
+    return kfadt;
 }
 
 /* Obtain and map RSDP ACPI table address. */
@@ -173,9 +182,12 @@ HPET *
 get_hpet(void) {
     // LAB 5: Your code here
     // (use acpi_find_table)
-    static HPET *hpet;
-    hpet = acpi_find_table("HPET");
-    return hpet;
+
+    static HPET *khpet;
+    if (!khpet)
+        khpet = acpi_find_table("HPET");
+
+    return khpet;
 }
 
 /* Getting physical HPET timer address from its table. */
@@ -192,7 +204,6 @@ hpet_register(void) {
 void
 hpet_print_struct(void) {
     HPET *hpet = get_hpet();
-    assert(hpet != NULL);
     cprintf("signature = %s\n", (hpet->h).Signature);
     cprintf("length = %08x\n", (hpet->h).Length);
     cprintf("revision = %08x\n", (hpet->h).Revision);
@@ -234,9 +245,9 @@ hpet_init() {
         hpetFemto = (uintptr_t)(cap >> 32);
         if (!(cap & HPET_LEG_RT_CAP)) panic("HPET has no LegacyReplacement mode");
 
-        // cprintf("hpetFemto = %llu\n", hpetFemto);
+        /* cprintf("hpetFemto = %llu\n", hpetFemto); */
         hpetFreq = (1 * Peta) / hpetFemto;
-        // cprintf("HPET: Frequency = %d.%03dMHz\n", (uintptr_t)(hpetFreq / Mega), (uintptr_t)(hpetFreq % Mega));
+        /* cprintf("HPET: Frequency = %d.%03dMHz\n", (uintptr_t)(hpetFreq / Mega), (uintptr_t)(hpetFreq % Mega)); */
         /* Enable ENABLE_CNF bit to enable timer */
         hpetReg->GEN_CONF |= HPET_ENABLE_CNF;
         nmi_enable();
@@ -277,10 +288,12 @@ void
 hpet_enable_interrupts_tim0(void) {
     // LAB 5: Your code here
     hpetReg->GEN_CONF |= HPET_LEG_RT_CNF;
-    hpetReg->TIM0_CONF = (IRQ_TIMER << 9); 
-    hpetReg->TIM0_CONF |= HPET_TN_TYPE_CNF | HPET_TN_INT_ENB_CNF | HPET_TN_VAL_SET_CNF;
-    hpetReg->TIM0_COMP = hpet_get_main_cnt() + Peta / hpetFemto / 2;
-    hpetReg->TIM0_COMP = Peta / hpetFemto / 2;
+    hpetReg->TIM0_CONF = 0;
+    hpetReg->TIM0_CONF |= (IRQ_TIMER << 9);
+    hpetReg->TIM0_CONF |= HPET_TN_TYPE_CNF;
+    hpetReg->TIM0_CONF |= HPET_TN_INT_ENB_CNF;
+    hpetReg->TIM0_CONF |= HPET_TN_VAL_SET_CNF;
+    hpetReg->TIM0_COMP = Peta / 2 / hpetFemto;
     pic_irq_unmask(IRQ_TIMER);
 }
 
@@ -288,10 +301,12 @@ void
 hpet_enable_interrupts_tim1(void) {
     // LAB 5: Your code here
     hpetReg->GEN_CONF |= HPET_LEG_RT_CNF;
-    hpetReg->TIM1_CONF = (IRQ_CLOCK << 9);
-    hpetReg->TIM1_CONF |= HPET_TN_TYPE_CNF | HPET_TN_INT_ENB_CNF | HPET_TN_VAL_SET_CNF;
-    hpetReg->TIM1_COMP = hpet_get_main_cnt() + Peta / hpetFemto / 2 * 3;
-    hpetReg->TIM1_COMP = Peta / hpetFemto / 2 * 3;
+    hpetReg->TIM1_CONF = 0;
+    hpetReg->TIM1_CONF |= (IRQ_CLOCK << 9);
+    hpetReg->TIM1_CONF |= HPET_TN_TYPE_CNF;
+    hpetReg->TIM1_CONF |= HPET_TN_INT_ENB_CNF;
+    hpetReg->TIM1_CONF |= HPET_TN_VAL_SET_CNF;
+    hpetReg->TIM1_COMP = 3 * Peta / 2 / hpetFemto;
     pic_irq_unmask(IRQ_CLOCK);
 }
 
@@ -313,16 +328,24 @@ hpet_cpu_frequency(void) {
     static uint64_t cpu_freq;
 
     // LAB 5: Your code here
+    if (cpu_freq)
+        return cpu_freq;
 
-    uint64_t first = hpet_get_main_cnt();
-    uint64_t first_tsc = read_tsc();
-    uint64_t next = first;
-    uint64_t eps = hpetFreq / 10;
-    while (next - first < eps) {
-        next = hpet_get_main_cnt();
-    }
-    uint64_t next_tsc = read_tsc();
-    cpu_freq = (next_tsc - first_tsc) * 10;
+    const uint64_t wait = 100;
+
+    uint64_t hpet_delta;
+    uint64_t hpet_start = hpet_get_main_cnt();
+    uint64_t tsc_start = read_tsc();
+    uint64_t tsc_end;
+
+    do {
+        asm("pause");
+        hpet_delta = hpet_get_main_cnt() - hpet_start;
+        tsc_end = read_tsc();
+    } while (hpet_delta < hpetFreq / wait);
+
+    cpu_freq = (tsc_end - tsc_start) * hpetFreq / hpet_delta;
+
     return cpu_freq;
 }
 
@@ -340,22 +363,32 @@ pmtimer_cpu_frequency(void) {
     static uint64_t cpu_freq;
 
     // LAB 5: Your code here
-    uint32_t first = pmtimer_get_timeval();
-    uint64_t first_tsc = read_tsc();
-    uint32_t next = first;
-    uint64_t d = 0;
-    uint64_t eps = PM_FREQ / 10;
-    while (d < eps) {
-        next = pmtimer_get_timeval();
-        if (first - next <= 0xFFFFFF) {
-            d = next - first + 0xFFFFFF;
-        } else if (first - next > 0) {
-            d = next - first + 0xFFFFFFFF;
+    if (cpu_freq)
+        return cpu_freq;
+
+    const uint64_t wait = 100;
+
+    uint64_t pm_delta;
+    uint64_t pm_start = pmtimer_get_timeval();
+    uint64_t tsc_start = read_tsc();
+    uint64_t tsc_end;
+
+    do {
+        asm("pause");
+        uint64_t pm_cur = pmtimer_get_timeval();
+        tsc_end = read_tsc();
+        if (pm_start <= pm_cur) {
+            /* No overflow */
+            pm_delta = pm_cur - pm_start;
+        } else if (pm_start - pm_cur <= 0x00FFFFFF) {
+            /* 24-bit overflow */
+            pm_delta = 0x00FFFFFF - pm_start + pm_cur;
         } else {
-            d = next- first;
+            pm_delta = 0xFFFFFFFF - pm_start + pm_cur;
         }
-    }
-    uint64_t next_tsc = read_tsc();
-    cpu_freq = (next_tsc - first_tsc) * 10;
+    } while (pm_delta < PM_FREQ / wait);
+
+    cpu_freq = (tsc_end - tsc_start) * PM_FREQ / pm_delta;
+
     return cpu_freq;
 }

@@ -9,6 +9,7 @@
 #include <kern/monitor.h>
 #include <kern/tsc.h>
 #include <kern/console.h>
+#include <kern/pmap.h>
 #include <kern/env.h>
 #include <kern/timer.h>
 #include <kern/trap.h>
@@ -130,7 +131,7 @@ i386_init(void) {
     early_boot_pml4_init();
 
     /* Initialize the console.
-     * Can't call cprintf until after we do this! */
+    * Can't call cprintf until after we do this! */
     cons_init();
 
     tsc_calibrate();
@@ -140,14 +141,15 @@ i386_init(void) {
         cprintf("END: %p\n", end);
     }
 
+    /* Lab 6 memory management initialization functions */
+    init_memory();
+
     pic_init();
     timers_init();
 
     /* Framebuffer init should be done after memory init */
     fb_init();
     if (trace_init) cprintf("Framebuffer initialised\n");
-
-    trap_init();
 
     /* User environment initialization functions */
     env_init();
@@ -156,8 +158,8 @@ i386_init(void) {
     timers_schedule("hpet0");
 
 #ifdef CONFIG_KSPACE
-    /* 
-    ENV_CREATE_KERNEL_TYPE(prog_test1);
+    /* Touch all you want */
+    /*ENV_CREATE_KERNEL_TYPE(prog_test1);
     ENV_CREATE_KERNEL_TYPE(prog_test2);
     ENV_CREATE_KERNEL_TYPE(prog_test3);
     ENV_CREATE_KERNEL_TYPE(prog_test4);
