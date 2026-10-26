@@ -14,6 +14,7 @@
 #include <kern/kdebug.h>
 #include <kern/macro.h>
 #include <kern/traceopt.h>
+#include <kern/pmap.h>
 
 /* Currently active environment */
 struct Env *curenv = NULL;
