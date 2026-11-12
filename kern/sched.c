@@ -7,41 +7,26 @@
 struct Taskstate cpu_ts;
 _Noreturn void sched_halt(void);
 
-/* Choose a user environment to run and run it */
 _Noreturn void
 sched_yield(void) {
-    /* Implement simple round-robin scheduling.
-     *
-     * Search through 'envs' for an ENV_RUNNABLE environment in
-     * circular fashion starting just after the env was
-     * last running.  Switch to the first such environment found.
-     *
-     * If no envs are runnable, but the environment previously
-     * running is still ENV_RUNNING, it's okay to
-     * choose that environment.
-     *
-     * If there are no runnable environments,
-     * simply drop through to the code
-     * below to halt the cpu */
+    const size_t last_sched = curenv ? curenv - envs : NENV - 1;
 
-    // LAB 3: Your code here:
-    const size_t last_sched = curenv ? curenv - envs : 0;
-    size_t next = last_sched + 1;
-    next %= NENV;
-    while (next != last_sched) {
-        if (envs[next].env_status == ENV_RUNNABLE || envs[next].env_status == ENV_RUNNING)
-            break;
+    size_t next = (last_sched + 1) % NENV;
+
+    for (size_t i = 0; i < NENV; i++) {
+        if (envs[next].env_status == ENV_RUNNABLE) {
+            env_run(&envs[next]);
+        }
+
         next++;
         next %= NENV;
     }
 
-    if (envs[next].env_status == ENV_RUNNABLE || envs[next].env_status == ENV_RUNNING)
-        env_run(&envs[next]);
+    if (curenv && curenv->env_status == ENV_RUNNING)
+        env_run(curenv);
 
     cprintf("Halt\n");
 
-    /* No runnable environments,
-     * so just halt the cpu */
     sched_halt();
 }
 

@@ -10,7 +10,8 @@
 
 .globl entry
 entry:
-    #lab4
+    # LAB 4 code
+    # Mask interrupts for kernel
     cli
     # Set up kernel stack
     leaq bootstacktop(%rip),%rsp
@@ -47,6 +48,7 @@ save_trapframe_syscall:
     # fallthrough
 
 save_trapframe:
+    # Guard to avoid hard to debug errors due to cli misusage.
     orl $FL_IF, saved_rflags(%rip)
 
     # We already pushed ss,rsp,rflags,cs,rip
@@ -67,7 +69,8 @@ save_trapframe:
 .globl sys_yield
 .type  sys_yield, @function
 sys_yield:
-    #lab4
+    # LAB 4 code
+    # Mask interrupts for kernel
     cli
     call save_trapframe_syscall
     call csys_yield
@@ -77,6 +80,8 @@ sys_yield:
 .globl sys_exit
 .type  sys_exit, @function
 sys_exit:
+    # LAB 4 code
+    # Mask interrupts for kernel
     cli
     leaq (bootstacktop)(%rip), %rsp
     xor %ebp, %ebp

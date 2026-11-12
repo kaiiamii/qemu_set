@@ -9,12 +9,13 @@
 
 #include <kern/env.h>
 #include <kern/pmap.h>
+#include <kern/trap.h>
 #include <kern/monitor.h>
 #include <kern/sched.h>
 #include <kern/kdebug.h>
 #include <kern/macro.h>
-#include <kern/traceopt.h>
 #include <kern/pmap.h>
+#include <kern/traceopt.h>
 
 /* Currently active environment */
 struct Env *curenv = NULL;
@@ -87,15 +88,24 @@ envid2env(envid_t envid, struct Env **env_store, bool need_check_perm) {
  */
 void
 env_init(void) {
+    /* kzalloc_region only works with current_space != NULL */
 
-    /* Set up envs array */
+    /* Allocate envs array with kzalloc_region().
+     * kzalloc_region() only works with current_space != NULL. */
+    envs = kzalloc_region(NENV * sizeof(*envs));
+    memset(envs, 0, ROUNDUP(NENV * sizeof(*envs), PAGE_SIZE));
 
-    // LAB 3: Your code here
+    /* Map envs to UENVS read-only, but user-accessible. */
+    map_region(current_space, UENVS, &kspace, (uintptr_t)envs,
+               UENVS_SIZE, PROT_R | PROT_USER_);
+
+    /* Set up envs array (Lab 3). */
     env_free_list = &envs[0];
     for (size_t i = 0; i < NENV - 1; i++) {
         envs[i].env_id = 0;
         envs[i].env_link = &envs[i + 1];
     }
+    envs[NENV - 1].env_id = 0;
     envs[NENV - 1].env_link = NULL;
 
 }
@@ -115,6 +125,10 @@ env_alloc(struct Env **newenv_store, envid_t parent_id, enum EnvType type) {
     struct Env *env;
     if (!(env = env_free_list))
         return -E_NO_FREE_ENV;
+
+    /* Allocate and set up the page directory for this environment. */
+    int res = init_address_space(&env->address_space);
+    if (res < 0) return res;
 
     /* Generate an env_id for this environment */
     int32_t generation = (env->env_id + (1 << ENVGENSHIFT)) & ~(NENV - 1);
@@ -332,115 +346,121 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
  * чтобы процесс знал, откуда начинать.*/
 static int
 load_icode(struct Env *env, uint8_t *binary, size_t size) {
-    // LAB 3: Your code here
-    /* проверка elf- заголовка */
-     if (binary == NULL) 
+    // LAB 3: Validate and load the ELF image.
+    if (binary == NULL)
         return -E_INVALID_EXE;
 
-    /* проверяем, что заголовок ELF целиком помещается в буфер и выровнен */        
-    if (elf_region_check(binary, size, 0, sizeof(struct Elf), _Alignof(struct Elf))<0)
+    /* Check that the ELF header is completely inside the input buffer. */
+    if (elf_region_check(binary, size, 0, sizeof(struct Elf),
+                         _Alignof(struct Elf)) < 0)
         return -E_INVALID_EXE;
 
-    /*чтобы обращаться как к заголовоку а не через смещение*/
-    struct Elf *elf = (struct Elf *)binary; 
-    /*проверка на elf*/
-    if (elf->e_magic != ELF_MAGIC)  
-        return -E_INVALID_EXE;
+    struct Elf *elf = (struct Elf *)binary;
 
-    /* проверяем, что файл 64-битный */
+    if (elf->e_magic != ELF_MAGIC)
+        return -E_INVALID_EXE;
     if (elf->e_elf[EI_CLASS] != ELFCLASS64)
         return -E_INVALID_EXE;
-
-     /* проверяем, что данные в little-endian (x86 — little-endian) */
     if (elf->e_elf[EI_DATA] != ELFDATA2LSB)
         return -E_INVALID_EXE;
-
-    /* проверяем версию ELF: и в e_ident, и в e_version — обе должны быть EV_CURRENT */
-    if ((elf->e_elf[EI_VERSION] != EV_CURRENT) ||
-        (elf->e_version != EV_CURRENT))
+    if (elf->e_elf[EI_VERSION] != EV_CURRENT ||
+        elf->e_version != EV_CURRENT)
         return -E_INVALID_EXE;
-    
-    /* проверяем тип: JOS загружает только ET_EXEC (готовый к запуску) */
     if (elf->e_type != ET_EXEC)
         return -E_INVALID_EXE;
-
-     /* проверяем архитектуру: должна быть x86-64 */
     if (elf->e_machine != EM_X86_64)
         return -E_INVALID_EXE;
-
-     /* проверяем, что размер заголовка совпадает с sizeof(struct Elf) */
     if (elf->e_ehsize != sizeof(struct Elf))
         return -E_INVALID_EXE;
 
-
-
-                            /* Proghdr check */
-
-    /* проверяем, что размер одной записи program header совпадает с sizeof(struct Proghdr) */
+    /* Validate the program-header table. */
     if (elf->e_phentsize != sizeof(struct Proghdr))
         return -E_INVALID_EXE;
-
-    /* проверяем, что таблица program headers не перекрывается с ELF-заголовком */
     if (elf->e_phoff < elf->e_ehsize)
         return -E_INVALID_EXE;
-
-    /*Таблица сегментов начинается с e_phoff, e_phnum количество сегментов*/
     if (elf_region_check(binary, size, elf->e_phoff,
-                       (uint64_t)elf->e_phnum * sizeof(struct Proghdr),
-                       _Alignof(struct Proghdr))<0)   /*проверка границ и выравнивание*/
+                         (uint64_t)elf->e_phnum * sizeof(struct Proghdr),
+                         _Alignof(struct Proghdr)) < 0)
         return -E_INVALID_EXE;
-    /*указатель массив записей в таблице смещений*/
-    struct Proghdr *ph = (struct Proghdr *)(binary + elf->e_phoff); 
-    /*инициализация границ образа-потом проверим что адрес переменной в этих границах*/
-    uintptr_t image_start = UINTPTR_MAX, image_end = 0;
+
+    struct Proghdr *ph = (struct Proghdr *)(binary + elf->e_phoff);
+    uintptr_t image_start = UINTPTR_MAX;
+    uintptr_t image_end = 0;
+
+    /* The image must be loaded while its address space is active, because
+     * the segment contents are copied to their virtual addresses directly. */
+    switch_address_space(&env->address_space);
 
     for (size_t i = 0; i < elf->e_phnum; i++) {
         if (ph[i].p_type != ELF_PROG_LOAD)
             continue;
-        /*данных в файле не более чем в памяти*/
+
         if (ph[i].p_filesz > ph[i].p_memsz)
             return -E_INVALID_EXE;
 
-        /* проверяем, что p_align — степень двойки */
-        if ((ph[i].p_align & (ph[i].p_align - 1)) != 0)
+        /* p_align may be 0 or 1 (no alignment constraint); otherwise it
+         * must be a power of two and p_offset/p_va must be congruent. */
+        if (ph[i].p_align > 1) {
+            if ((ph[i].p_align & (ph[i].p_align - 1)) != 0)
+                return -E_INVALID_EXE;
+            if (ph[i].p_offset % ph[i].p_align !=
+                ph[i].p_va % ph[i].p_align)
+                return -E_INVALID_EXE;
+        }
+
+        /* File-backed segment bytes must be inside the ELF buffer. */
+        if (elf_region_check(binary, size, ph[i].p_offset,
+                             ph[i].p_filesz, 1) < 0)
             return -E_INVALID_EXE;
 
-        /* проверяем, что offset и vaddr согласованы по модулю p_align (требование ELF) */
-        if (ph[i].p_offset % ph[i].p_align != ph[i].p_va % ph[i].p_align)
+        /* Validate the complete virtual range, not only its first byte. */
+        if (ph[i].p_va >= MAX_USER_READABLE ||
+            ph[i].p_memsz > UINTPTR_MAX - ph[i].p_va ||
+            ph[i].p_memsz > MAX_USER_READABLE - ph[i].p_va)
             return -E_INVALID_EXE;
 
-
-        /* Данные сегмента целиком внутри файла */
-        /*p_offset	смещение сегмента в файле, p_filesz	размер сегмента в файле*/
-        if (elf_region_check(binary, size, ph[i].p_offset, ph[i].p_filesz, 1)<0)
+        uintptr_t segment_end = ph[i].p_va + ph[i].p_memsz;
+        uintptr_t map_start = ROUNDDOWN((uintptr_t)ph[i].p_va, PAGE_SIZE);
+        uintptr_t map_end = ROUNDUP(segment_end, PAGE_SIZE);
+        if (map_end < segment_end || map_end < map_start)
             return -E_INVALID_EXE;
 
-        // Check for valid virtual address
-        if (ph[i].p_va > MAX_USER_READABLE)
-            return -E_INVALID_EXE;
+        /* Map all pages touched by this segment with rights from p_flags. */
+        int prot = PROT_USER_ | ALLOC_ZERO;
+        if (ph[i].p_flags & ELF_PROG_FLAG_READ)  prot |= PROT_R;
+        if (ph[i].p_flags & ELF_PROG_FLAG_WRITE) prot |= PROT_W;
+        if (ph[i].p_flags & ELF_PROG_FLAG_EXEC)  prot |= PROT_X;
 
-        /* p_va + p_memsz не переполняется */
-        /*p_memsz	размер сегмента в памяти, p_va	адрес в памяти, куда положить сегмент*/
-        if (ph[i].p_memsz > UINTPTR_MAX - ph[i].p_va)
-            return -E_INVALID_EXE;
-        /*кладем сегмент в память, зануляем хвост сегмента*/
-        memcpy((void *)ph[i].p_va, binary + ph[i].p_offset, ph[i].p_filesz);
-        memset((void *)(ph[i].p_va + ph[i].p_filesz), 0, ph[i].p_memsz - ph[i].p_filesz);
+        map_region(&env->address_space, map_start, NULL, 0,
+                   map_end - map_start, prot);
 
-        /* обновляем минимальный и максимальный адрес среди наших сегментов*/
-        if (ph[i].p_va < image_start) image_start = ph[i].p_va;
-        if (ph[i].p_va + ph[i].p_memsz > image_end) image_end = ph[i].p_va + ph[i].p_memsz;
+        memcpy((void *)(uintptr_t)ph[i].p_va,
+               binary + ph[i].p_offset, ph[i].p_filesz);
+        memset((void *)(uintptr_t)(ph[i].p_va + ph[i].p_filesz), 0,
+               ph[i].p_memsz - ph[i].p_filesz);
+
+        if (ph[i].p_va < image_start)
+            image_start = ph[i].p_va;
+        if (segment_end > image_end)
+            image_end = segment_end;
     }
 
-    /* Должен быть хотя бы один загружаемый сегмент,
-     * и точка входа должна указывать внутрь загруженной программы */
-    if (image_start >= image_end)
+    /* At least one loadable segment must exist, and the entry point must
+     * point into the loaded image. */
+    if (image_start >= image_end ||
+        elf->e_entry < image_start || elf->e_entry >= image_end)
         return -E_INVALID_EXE;
-    if (elf->e_entry < image_start || elf->e_entry >= image_end)
-        return -E_INVALID_EXE;
-    /* записываем точку входа в trapframe щкружение*/
+
+    /* Lab 8: create the user stack in this environment's address space.
+     * The stack is not an ELF segment, so its rights are fixed: R+W (NX). */
+    map_region(&env->address_space, USER_STACK_TOP - USER_STACK_SIZE,
+               NULL, 0, USER_STACK_SIZE,
+               PROT_R | PROT_W | PROT_USER_ | ALLOC_ZERO);
+
+    /* Set the entry point saved in the environment's trap frame. */
     env->env_tf.tf_rip = elf->e_entry;
 
+    /* Keep the Lab 3 symbol binding implementation. */
     return bind_functions(env, binary, size, image_start, image_end);
 }
 
@@ -452,7 +472,7 @@ load_icode(struct Env *env, uint8_t *binary, size_t size) {
  */
 void
 env_create(uint8_t *binary, size_t size, enum EnvType type) {
-    // LAB 3: Your code here
+    // LAB 3: Allocate the environment and load the ELF image.
     struct Env *env;
     int status = env_alloc(&env, 0, type);
     if (status < 0)
@@ -462,6 +482,7 @@ env_create(uint8_t *binary, size_t size, enum EnvType type) {
     if (status < 0)
         panic("Error. Could not load executable : %i", status);
 
+    // LAB 8: Keep the original kernel-resident binary for user debuginfo.
     env->binary = binary;
 }
 
@@ -472,6 +493,17 @@ env_free(struct Env *env) {
 
     /* Note the environment's demise. */
     if (trace_envs) cprintf("[%08x] free env %08x\n", curenv ? curenv->env_id : 0, env->env_id);
+
+#ifndef CONFIG_KSPACE
+    /* If freeing the current environment, switch to kern_pgdir
+     * before freeing the page directory, just in case the page
+     * gets reused. */
+    if (&env->address_space == current_space)
+        switch_address_space(&kspace);
+
+    static_assert(MAX_USER_ADDRESS % HUGE_PAGE_SIZE == 0, "Misaligned MAX_USER_ADDRESS");
+    release_address_space(&env->address_space);
+#endif
 
     /* Return the environment to the free list */
     env->env_status = ENV_FREE;
@@ -486,9 +518,12 @@ env_free(struct Env *env) {
  */
 void
 env_destroy(struct Env *env) {
+    /* Reset the page-fault flag before destroying the environment.  In
+     * particular, sched_yield() below may never return for curenv. */
+    in_page_fault = 0;
+
     env->env_status = ENV_DYING;
     env_free(env);
-
     if (env == curenv)
         sched_yield();
 }
@@ -516,14 +551,6 @@ csys_yield(struct Trapframe *tf) {
 
 _Noreturn void
 env_pop_tf(struct Trapframe *tf) {
-
-    /* Push RIP on program stack */
-    tf->tf_rsp -= sizeof(uintptr_t);
-    *((uintptr_t *)tf->tf_rsp) = tf->tf_rip;
-    /* Push RFLAGS on program stack */
-    tf->tf_rsp -= sizeof(uintptr_t);
-    *((uintptr_t *)tf->tf_rsp) = tf->tf_rflags;
-
     asm volatile(
             "movq %0, %%rsp\n"
             "movq 0(%%rsp), %%r15\n"
@@ -541,11 +568,12 @@ env_pop_tf(struct Trapframe *tf) {
             "movq 96(%%rsp), %%rcx\n"
             "movq 104(%%rsp), %%rbx\n"
             "movq 112(%%rsp), %%rax\n"
-            "movq (128+48)(%%rsp), %%rsp\n"
-            "popfq; ret" ::"g"(tf)
+            "movw 120(%%rsp), %%es\n"
+            "movw 128(%%rsp), %%ds\n"
+            "addq $152,%%rsp\n"
+            "iretq" ::"g"(tf)
             : "memory");
 
-    /* Mostly to placate the compiler */
     panic("Reached unrecheble\n");
 }
 
@@ -580,11 +608,9 @@ env_run(struct Env *env) {
         cprintf("[%08X] env started: %s\n", env->env_id, state[env->env_status]);
     }
 
-    // LAB 3: Your code here
-    if (curenv) {
-        if (curenv->env_status == ENV_RUNNING)
-            curenv->env_status = ENV_RUNNABLE;
-    }
+    // LAB 3: Mark the previously running environment as runnable.
+    if (curenv && curenv->env_status == ENV_RUNNING)
+        curenv->env_status = ENV_RUNNABLE;
 
     if (env->env_status != ENV_RUNNABLE)
         panic("Scheduled process is not runnable");
@@ -593,7 +619,8 @@ env_run(struct Env *env) {
     curenv->env_status = ENV_RUNNING;
     curenv->env_runs++;
 
-
+    // LAB 8: Switch to this environment's virtual address space.
+    switch_address_space(&curenv->address_space);
     env_pop_tf(&curenv->env_tf);
     
     while (1)

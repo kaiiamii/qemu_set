@@ -13,9 +13,6 @@
  *
  * Don't forget to disable NMI for the time of
  * operation (look up for the appropriate constant in kern/kclock.h)
- * NOTE: CMOS_CMD is the same port that is used to toggle NMIs,
- * so nmi_disable() cannot be used. And you have to use provided
- * constant.
  *
  * Why it is necessary?
  */
@@ -24,9 +21,11 @@ uint8_t
 cmos_read8(uint8_t reg) {
     /* MC146818A controller */
     // LAB 4: Your code here
+
     uint8_t res = 0;
     outb(CMOS_CMD, reg | CMOS_NMI_LOCK);
     res = inb(CMOS_DATA);
+
     nmi_enable();
     return res;
 }
@@ -36,6 +35,7 @@ cmos_write8(uint8_t reg, uint8_t value) {
     // LAB 4: Your code here
     outb(CMOS_CMD, reg | CMOS_NMI_LOCK);
     outb(CMOS_DATA, value);
+
     nmi_enable();
 }
 
@@ -67,14 +67,15 @@ struct Timer timer_rtc = {
 void
 rtc_timer_init(void) {
     // LAB 4: Your code here
-    // (use cmos_read8()/cmos_write8())
+    // (use cmos_read8/cmos_write8)
     cmos_write8(RTC_AREG, cmos_read8(RTC_AREG) | 0xF);
+
     cmos_write8(RTC_BREG, cmos_read8(RTC_BREG) | RTC_PIE);
 }
 
 uint8_t
 rtc_check_status(void) {
     // LAB 4: Your code here
-    // (use cmos_read8())
+    // (use cmos_read8)
     return cmos_read8(RTC_CREG);
 }
