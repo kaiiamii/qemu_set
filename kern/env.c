@@ -90,23 +90,22 @@ void
 env_init(void) {
     /* kzalloc_region only works with current_space != NULL */
 
-    /* Allocate envs array with kzalloc_region().
-     * kzalloc_region() only works with current_space != NULL. */
+    /* Allocate envs array with kzalloc_region
+     * (don't forget about rounding) */
+    // LAB 8: Your code here
     envs = kzalloc_region(NENV * sizeof(*envs));
     memset(envs, 0, ROUNDUP(NENV * sizeof(*envs), PAGE_SIZE));
 
-    /* Map envs to UENVS read-only, but user-accessible. */
-    map_region(current_space, UENVS, &kspace, (uintptr_t)envs,
-               UENVS_SIZE, PROT_R | PROT_USER_);
-
-    /* Set up envs array (Lab 3). */
+    /* Map envs to UENVS read-only,
+     * but user-accessible (with PROT_USER_ set) */
+    // LAB 8: Your code here
+    map_region(current_space, UENVS, &kspace, (uintptr_t)envs, UENVS_SIZE, PROT_R | PROT_USER_);
+    /* Set up envs array */
     env_free_list = &envs[0];
     for (size_t i = 0; i < NENV - 1; i++) {
-        envs[i].env_id = 0;
         envs[i].env_link = &envs[i + 1];
     }
-    envs[NENV - 1].env_id = 0;
-    envs[NENV - 1].env_link = NULL;
+    // LAB 3: Your code here
 
 }
 
@@ -168,7 +167,6 @@ env_alloc(struct Env **newenv_store, envid_t parent_id, enum EnvType type) {
     env->env_tf.tf_cs = GD_KT;
 
     // LAB 3: Your code here:
-    
     static uintptr_t stack_top = 0x2000000;
     env->env_tf.tf_rsp = stack_top - 2 * PAGE_SIZE * (env - envs);
 #else
@@ -181,6 +179,12 @@ env_alloc(struct Env **newenv_store, envid_t parent_id, enum EnvType type) {
 
     /* For now init trapframe with IF set */
     env->env_tf.tf_rflags = FL_IF;
+
+    /* Clear the page fault handler until user installs one. */
+    env->env_pgfault_upcall = 0;
+
+    /* Also clear the IPC receiving flag. */
+    env->env_ipc_recving = 0;
 
     /* Commit the allocation */
     env_free_list = env->env_link;
@@ -196,107 +200,51 @@ env_alloc(struct Env **newenv_store, envid_t parent_id, enum EnvType type) {
  * must be performed within the image_start/image_end range.
  */
 
-static int 
-elf_region_check(const uint8_t *binary, size_t size, uint64_t off, uint64_t len, size_t align) {
-    if (off > size) 
-        return -1;                          /* начало внутри файла */
-    if (len > size - off) 
-        return -1;                          /* конец внутри файла, без переполнения */
-    if (((uintptr_t)binary + off) % align) 
-        return -1;                          /* выравнивание */
+static size_t
+find_section(struct Secthdr *sh, char *shstr, size_t shnum, uint32_t type, const char *section_name) {
+    for (size_t i = 0; i < shnum; i++) {
+        struct Secthdr *sh_cur = sh + i;
+        if (sh_cur->sh_type == type && !strcmp(shstr + sh_cur->sh_name, section_name)) {
+            return i;
+        }
+    }
     
     return 0;
 }
-/* вписать в переменные программы адреса реальных функций ядра.*/
+
 static int
 bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_start, uintptr_t image_end) {
     // LAB 3: Your code here:
 
     /* NOTE: find_function from kdebug.c should be used */
 
-    /* Заголовок ELF уже проверен в load_icode */
-    struct Elf *elf = (struct Elf *)binary;
+    struct Elf *segments = (struct Elf *)binary;
 
-    /* размер записи в таблице заголовков секций совпадает с размером структуры*/
-    if (elf->e_shentsize != sizeof(struct Secthdr)) 
-        return -E_INVALID_EXE;
-    /*таблица в файле и выровнена*/
-    /*e_shoff смещение от начала файла таблицы секций, e_shnum сколько в ней записей*/
-    if (elf_region_check(binary, size, elf->e_shoff,
-                       (uint64_t)elf->e_shnum * sizeof(struct Secthdr),
-                       _Alignof(struct Secthdr))<0)
-        return -E_INVALID_EXE;
-    /*указатель на массив записей section headers.*/
-    struct Secthdr *sh = (struct Secthdr *)(binary + elf->e_shoff); /*указатель на тыблицу секций*/
-    /*роходим по всем записям таблицы секций*/
-    for (size_t i = 0; i < elf->e_shnum; i++) {
-        /*пропускаем все что не таблица символов*/
-        if (sh[i].sh_type != ELF_SHT_SYMTAB)    
-            continue;
+    struct Secthdr *sh = (struct Secthdr *)(binary + segments->e_shoff);
+    char *shstr = (char *)binary + sh[segments->e_shstrndx].sh_offset;
 
-        /* Таблица символов */
-        /*размер записей совпадает и размер секции делится на размер записи*/
-        if (sh[i].sh_entsize != sizeof(struct Elf64_Sym) ||
-            sh[i].sh_size % sizeof(struct Elf64_Sym))
-            return -E_INVALID_EXE;
-        /*вся таблица символов лежит внутри файла*/
-        if (elf_region_check(binary, size, sh[i].sh_offset, sh[i].sh_size,
-                           _Alignof(struct Elf64_Sym))<0)
-            return -E_INVALID_EXE;
+    size_t strtab_section_num = find_section(sh, shstr, segments->e_shnum, ELF_SHT_STRTAB, ".strtab");
 
-        /* Связанная с ней таблица строк и ее индекс не выходит за пределы таблицы секций*/
-        if (sh[i].sh_link >= elf->e_shnum)
-            return -E_INVALID_EXE;
-        /*описание таблицы строк*/
-        struct Secthdr *str_sh = &sh[sh[i].sh_link];
-        /*SHT_STRTAB — иначе это не таблица строк,  и не пустая желательно*/
-        if (str_sh->sh_type != ELF_SHT_STRTAB || str_sh->sh_size == 0)
-            return -E_INVALID_EXE;
-        /*вся таблица строк лежит внутри файла*/
-        if (elf_region_check(binary, size, str_sh->sh_offset, str_sh->sh_size, 1)<0)
-            return -E_INVALID_EXE;
-        /* туказательна на таблицу строк переводим в в чар чтобы потом читать  посимвольно*/
-        const char *strtab = (const char *)(binary + str_sh->sh_offset);    
-        /* Последний байт — ноль, значит любая строка внутри таблицы заканчивается внутри неё */
-        if (strtab[str_sh->sh_size - 1] != '\0')
-            return -E_INVALID_EXE;
-         /*binary +(сsh[i].sh_offset-смещение таблицы символов) - адрес первого байта таблицы символов*/
-        struct Elf64_Sym *syms = (struct Elf64_Sym *)(binary + sh[i].sh_offset);   
-        /*колличество символов в таблице*/
-        size_t nsyms = sh[i].sh_size / sizeof(struct Elf64_Sym);    /*сколько записей*/
+    char *names = (char *)binary + sh[strtab_section_num].sh_offset;
 
-        for (size_t j = 0; j < nsyms; j++) {
-            /*st_info — это один байт, младшие 4 вид, старшие видимость*/
-            if (ELF64_ST_BIND(syms[j].st_info) != STB_GLOBAL ||
-                ELF64_ST_TYPE(syms[j].st_info) != STT_OBJECT)
-                continue;
-            /*смещение таблицы строк может выходить за пределы таблицы*/
-            if (syms[j].st_name >= str_sh->sh_size)
-                continue;
+    size_t symtab_section_num = find_section(sh, shstr, segments->e_shnum, ELF_SHT_SYMTAB, ".symtab");
 
-            const char *name = strtab + syms[j].st_name;
-            /*ищет в таблице символов ядра функцию с заданным именем и возвращает её адрес.*/
+    struct Elf64_Sym *symbols = (struct Elf64_Sym *)(binary + sh[symtab_section_num].sh_offset);
+    size_t symbols_cnt = sh[symtab_section_num].sh_size / sizeof(*symbols);
+
+    for (size_t i = 0; i < symbols_cnt; i++) {
+        struct Elf64_Sym *symbol = &symbols[i];
+        if (ELF64_ST_BIND(symbol->st_info) == STB_GLOBAL &&
+            ELF64_ST_TYPE(symbol->st_info) == STT_OBJECT &&
+            symbol->st_size == sizeof(void *)) {
+            char *name = names + symbol->st_name;
             uintptr_t addr = find_function(name);
-            if (!addr)
-                continue;
-            /*st_value — это адрес переменной в образе программы.*/
-            uintptr_t var_addr = syms[j].st_value;
-
-            /*(void (*)(void)) — это тип «указатель на функцию, принимающую ничего (void) 
-            *и возвращающую ничего (void)*/
-            /* Получили именно указатель на функцию */
-            void (*func)(void) = (void (*)(void))addr;
-
-            /* Проверяем только, что запись лежит внутри образа */
-            if (var_addr < image_start ||
-                var_addr >= image_end ||
-                image_end - var_addr < sizeof(func))
-                return -E_INVALID_EXE;
-
-            /* Копируем сам указатель на функцию */
-            memcpy((void *)var_addr, &func, sizeof(func));
+            if (addr && symbol->st_value >= image_start && symbol->st_value <= image_end) {
+                *((uintptr_t *)symbol->st_value) = addr;
+            }
         }
     }
+
     return 0;
 }
 
@@ -331,137 +279,98 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
  *   'binary + ph->p_offset', should be copied to address
  *   ph->p_va.  Any remaining memory bytes should be cleared to zero.
  *   (The ELF header should have ph->p_filesz <= ph->p_memsz.)
+ *   Use functions from the previous labs to allocate and map pages.
  *
  *   All page protection bits should be user read/write for now.
  *   ELF segments are not necessarily page-aligned, but you can
  *   assume for this function that no two segments will touch
  *   the same page.
  *
+ *   You may find a function like map_region useful.
+ *
+ *   Loading the segments is much simpler if you can move data
+ *   directly into the virtual addresses stored in the ELF binary.
+ *   So which page directory should be in force during
+ *   this function?
+ *
  *   You must also do something with the program's entry point,
  *   to make sure that the environment starts executing there.
  *   What?  (See env_run() and env_pop_tf() below.) */
-
-/*Функция берёт binary, разбирает ELF-файл, 
- * копирует код и данные программы по нужным адресам и записывает в env_tf.tf_rip точку входа e_entry, 
- * чтобы процесс знал, откуда начинать.*/
 static int
 load_icode(struct Env *env, uint8_t *binary, size_t size) {
-    // LAB 3: Validate and load the ELF image.
-    if (binary == NULL)
+    // LAB 3: Your code here
+    struct Elf *segments = (struct Elf*) binary;
+    if (segments->e_magic != ELF_MAGIC) {
+        cprintf("Incorrect format of ELF file");
         return -E_INVALID_EXE;
-
-    /* Check that the ELF header is completely inside the input buffer. */
-    if (elf_region_check(binary, size, 0, sizeof(struct Elf),
-                         _Alignof(struct Elf)) < 0)
-        return -E_INVALID_EXE;
-
-    struct Elf *elf = (struct Elf *)binary;
-
-    if (elf->e_magic != ELF_MAGIC)
-        return -E_INVALID_EXE;
-    if (elf->e_elf[EI_CLASS] != ELFCLASS64)
-        return -E_INVALID_EXE;
-    if (elf->e_elf[EI_DATA] != ELFDATA2LSB)
-        return -E_INVALID_EXE;
-    if (elf->e_elf[EI_VERSION] != EV_CURRENT ||
-        elf->e_version != EV_CURRENT)
-        return -E_INVALID_EXE;
-    if (elf->e_type != ET_EXEC)
-        return -E_INVALID_EXE;
-    if (elf->e_machine != EM_X86_64)
-        return -E_INVALID_EXE;
-    if (elf->e_ehsize != sizeof(struct Elf))
-        return -E_INVALID_EXE;
-
-    /* Validate the program-header table. */
-    if (elf->e_phentsize != sizeof(struct Proghdr))
-        return -E_INVALID_EXE;
-    if (elf->e_phoff < elf->e_ehsize)
-        return -E_INVALID_EXE;
-    if (elf_region_check(binary, size, elf->e_phoff,
-                         (uint64_t)elf->e_phnum * sizeof(struct Proghdr),
-                         _Alignof(struct Proghdr)) < 0)
-        return -E_INVALID_EXE;
-
-    struct Proghdr *ph = (struct Proghdr *)(binary + elf->e_phoff);
-    uintptr_t image_start = UINTPTR_MAX;
-    uintptr_t image_end = 0;
-
-    /* The image must be loaded while its address space is active, because
-     * the segment contents are copied to their virtual addresses directly. */
-    switch_address_space(&env->address_space);
-
-    for (size_t i = 0; i < elf->e_phnum; i++) {
-        if (ph[i].p_type != ELF_PROG_LOAD)
-            continue;
-
-        if (ph[i].p_filesz > ph[i].p_memsz)
-            return -E_INVALID_EXE;
-
-        /* p_align may be 0 or 1 (no alignment constraint); otherwise it
-         * must be a power of two and p_offset/p_va must be congruent. */
-        if (ph[i].p_align > 1) {
-            if ((ph[i].p_align & (ph[i].p_align - 1)) != 0)
-                return -E_INVALID_EXE;
-            if (ph[i].p_offset % ph[i].p_align !=
-                ph[i].p_va % ph[i].p_align)
-                return -E_INVALID_EXE;
-        }
-
-        /* File-backed segment bytes must be inside the ELF buffer. */
-        if (elf_region_check(binary, size, ph[i].p_offset,
-                             ph[i].p_filesz, 1) < 0)
-            return -E_INVALID_EXE;
-
-        /* Validate the complete virtual range, not only its first byte. */
-        if (ph[i].p_va >= MAX_USER_READABLE ||
-            ph[i].p_memsz > UINTPTR_MAX - ph[i].p_va ||
-            ph[i].p_memsz > MAX_USER_READABLE - ph[i].p_va)
-            return -E_INVALID_EXE;
-
-        uintptr_t segment_end = ph[i].p_va + ph[i].p_memsz;
-        uintptr_t map_start = ROUNDDOWN((uintptr_t)ph[i].p_va, PAGE_SIZE);
-        uintptr_t map_end = ROUNDUP(segment_end, PAGE_SIZE);
-        if (map_end < segment_end || map_end < map_start)
-            return -E_INVALID_EXE;
-
-        /* Map all pages touched by this segment with rights from p_flags. */
-        int prot = PROT_USER_ | ALLOC_ZERO;
-        if (ph[i].p_flags & ELF_PROG_FLAG_READ)  prot |= PROT_R;
-        if (ph[i].p_flags & ELF_PROG_FLAG_WRITE) prot |= PROT_W;
-        if (ph[i].p_flags & ELF_PROG_FLAG_EXEC)  prot |= PROT_X;
-
-        map_region(&env->address_space, map_start, NULL, 0,
-                   map_end - map_start, prot);
-
-        memcpy((void *)(uintptr_t)ph[i].p_va,
-               binary + ph[i].p_offset, ph[i].p_filesz);
-        memset((void *)(uintptr_t)(ph[i].p_va + ph[i].p_filesz), 0,
-               ph[i].p_memsz - ph[i].p_filesz);
-
-        if (ph[i].p_va < image_start)
-            image_start = ph[i].p_va;
-        if (segment_end > image_end)
-            image_end = segment_end;
     }
 
-    /* At least one loadable segment must exist, and the entry point must
-     * point into the loaded image. */
-    if (image_start >= image_end ||
-        elf->e_entry < image_start || elf->e_entry >= image_end)
+    if (segments->e_shentsize != sizeof (struct Secthdr)) {
+        cprintf("Incorrect section size");
         return -E_INVALID_EXE;
+    }
 
-    /* Lab 8: create the user stack in this environment's address space.
-     * The stack is not an ELF segment, so its rights are fixed: R+W (NX). */
+    if (segments->e_shstrndx >= segments->e_shnum) {
+        cprintf("Incorrect index of string section");
+        return -E_INVALID_EXE;
+    }
+
+    if (segments->e_phentsize != sizeof (struct Proghdr)) {
+        cprintf("Incorrect size of program headers");
+        return -E_INVALID_EXE;
+    }
+
+    #ifdef CONFIG_KSPACE
+        uintptr_t image_start = 0;
+        bool start_set = 0;
+        uintptr_t image_end = 0;
+    #endif
+    switch_address_space(&env->address_space);
+    struct Proghdr *ph_array = (struct Proghdr *)(binary + segments->e_phoff);
+    for (size_t i = 0; i < segments->e_phnum; i++) {
+        struct Proghdr *ph = ph_array + i;
+        if (ph->p_type != ELF_PROG_LOAD)
+            continue;
+
+        void *src = binary + ph->p_offset;
+        void *dst = (void *)(ph->p_va);
+        if (ph->p_filesz > ph->p_memsz) {
+            cprintf("Error. Incorrect filesz of section");
+            return -E_INVALID_EXE;
+        }
+
+        if (src + ph->p_filesz > (void *)binary + size || src < (void *)binary)
+            continue;
+
+        #ifdef CONFIG_KSPACE
+            if (!start_set || (uintptr_t) dst < image_start) {
+                image_start = (uintptr_t) dst;
+                start_set = 1;
+            }
+            if (image_end < (uintptr_t)(dst + ph->p_memsz))
+                image_end = (uintptr_t)(dst + ph->p_memsz);
+        #endif
+
+        memcpy(dst, src, ph->p_filesz);
+        memset(dst + ph->p_filesz, 0, ph->p_memsz - ph->p_filesz);
+    }
+
     map_region(&env->address_space, USER_STACK_TOP - USER_STACK_SIZE,
-               NULL, 0, USER_STACK_SIZE,
-               PROT_R | PROT_W | PROT_USER_ | ALLOC_ZERO);
+        NULL, 0, USER_STACK_SIZE, PROT_R | PROT_W | PROT_USER_ | ALLOC_ZERO);
 
-    /* Set the entry point saved in the environment's trap frame. */
-    env->env_tf.tf_rip = elf->e_entry;
+    switch_address_space(&env->address_space);
+    env->env_tf.tf_rip = segments->e_entry;
 
-    /* Keep the Lab 3 symbol binding implementation. */
-    return bind_functions(env, binary, size, image_start, image_end);
+    #ifdef CONFIG_KSPACE
+        bind_functions(env, binary, size, image_start, image_end);
+
+        // LAB 8: Your code here
+        void *stack = kzalloc_region(USER_STACK_SIZE);
+        map_region(&(env->address_space), (uintptr_t) (USER_STACK_TOP - USER_STACK_SIZE),
+            &kspace, (uintptr_t) stack, USER_STACK_SIZE, PROT_R | PROT_W | PROT_USER_);
+    #endif
+
+    return 0;
 }
 
 /* Allocates a new env with env_alloc, loads the named elf
@@ -472,7 +381,8 @@ load_icode(struct Env *env, uint8_t *binary, size_t size) {
  */
 void
 env_create(uint8_t *binary, size_t size, enum EnvType type) {
-    // LAB 3: Allocate the environment and load the ELF image.
+    // LAB 8: Your code here
+    // LAB 3: Your code here
     struct Env *env;
     int status = env_alloc(&env, 0, type);
     if (status < 0)
@@ -481,9 +391,8 @@ env_create(uint8_t *binary, size_t size, enum EnvType type) {
     status = load_icode(env, binary, size);
     if (status < 0)
         panic("Error. Could not load executable : %i", status);
-
-    // LAB 8: Keep the original kernel-resident binary for user debuginfo.
     env->binary = binary;
+    env->env_type = type;
 }
 
 
@@ -518,16 +427,18 @@ env_free(struct Env *env) {
  */
 void
 env_destroy(struct Env *env) {
-    /* Reset the page-fault flag before destroying the environment.  In
-     * particular, sched_yield() below may never return for curenv. */
-    in_page_fault = 0;
-
+    /* If env is currently running on other CPUs, we change its state to
+     * ENV_DYING. A zombie environment will be freed the next time
+     * it traps to the kernel. */
     env->env_status = ENV_DYING;
     env_free(env);
-    if (env == curenv)
+    if (env == curenv) {
         sched_yield();
+    }
+    // LAB 3: Your code here
+    // LAB 8: Your code here (set in_page_fault = 0)
+    in_page_fault = 0;
 }
-
 
 #ifdef CONFIG_KSPACE
 void
@@ -570,10 +481,11 @@ env_pop_tf(struct Trapframe *tf) {
             "movq 112(%%rsp), %%rax\n"
             "movw 120(%%rsp), %%es\n"
             "movw 128(%%rsp), %%ds\n"
-            "addq $152,%%rsp\n"
+            "addq $152,%%rsp\n" /* skip tf_trapno and tf_errcode */
             "iretq" ::"g"(tf)
             : "memory");
 
+    /* Mostly to placate the compiler */
     panic("Reached unrecheble\n");
 }
 
@@ -587,6 +499,7 @@ env_pop_tf(struct Trapframe *tf) {
  *       2. Set 'curenv' to the new environment,
  *       3. Set its status to ENV_RUNNING,
  *       4. Update its 'env_runs' counter,
+ *       5. Use switch_address_space() to switch to its address space.
  * Step 2: Use env_pop_tf() to restore the environment's
  *       registers and starting execution of process.
 
@@ -608,21 +521,22 @@ env_run(struct Env *env) {
         cprintf("[%08X] env started: %s\n", env->env_id, state[env->env_status]);
     }
 
-    // LAB 3: Mark the previously running environment as runnable.
-    if (curenv && curenv->env_status == ENV_RUNNING)
-        curenv->env_status = ENV_RUNNABLE;
+    // LAB 3: Your code here
+    if (curenv) {
+        if (curenv->env_status == ENV_RUNNING)
+            curenv->env_status = ENV_RUNNABLE;
+    }
 
     if (env->env_status != ENV_RUNNABLE)
-        panic("Scheduled process is not runnable");
+        panic("Error. Scheduled process is not runnable");
 
     curenv = env;
     curenv->env_status = ENV_RUNNING;
     curenv->env_runs++;
 
-    // LAB 8: Switch to this environment's virtual address space.
     switch_address_space(&curenv->address_space);
     env_pop_tf(&curenv->env_tf);
-    
-    while (1)
-        ;
+    // LAB 8: Your code here
+
+    while(1) {}
 }

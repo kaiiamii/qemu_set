@@ -93,6 +93,9 @@ acpi_find_table(const char *sign) {
     static bool isXSDT = 0;
 
     if (!rsdt) {
+        if (!uefi_lp->ACPIRoot)
+            panic("No rsdp\n");
+
         physaddr_t acpi_phys = uefi_lp->ACPIRoot;
         RSDP *rsdp = mmio_map_region((physaddr_t)acpi_phys, sizeof(*rsdp));
 
@@ -108,13 +111,13 @@ acpi_find_table(const char *sign) {
             uint8_t checksum = 0;
             uint8_t *iter;
             for (iter = (uint8_t *)rsdp; iter < (uint8_t *)&(rsdp->Length); iter++)
-                checksum += *iter;
+                checksum = (uint8_t)(checksum + *iter);
 
             if (checksum)
                 panic("Malformed RSDP");
 
             for (; iter < ((uint8_t *)rsdp + sizeof(*rsdp)); iter++)
-                checksum += *iter;
+                checksum = (uint8_t)(checksum + *iter);
 
             if (checksum)
                 panic("Malformed RSDP");
@@ -127,7 +130,7 @@ acpi_find_table(const char *sign) {
             uint8_t *iter;
             /* Validate checksum of first half of struct */
             for (iter = (uint8_t *)rsdp; iter < (uint8_t *)&(rsdp->Length); iter++)
-                checksum += *iter;
+                checksum = (uint8_t)(checksum + *iter);
 
             if (checksum)
                 panic("Malformed RSDP");
@@ -142,7 +145,7 @@ acpi_find_table(const char *sign) {
         uint8_t checksum = 0;
  
         for (int i = 0; i < rsdt->h.Length; i++)
-            checksum += ((uint8_t *) &rsdt->h)[i];
+            checksum = (uint8_t)(checksum + ((uint8_t *) &rsdt->h)[i]);
         if (checksum)
                 panic("Malformed RSDT header");
     }
@@ -150,6 +153,8 @@ acpi_find_table(const char *sign) {
     size_t entries_cnt = (rsdt->h.Length - sizeof(ACPISDTHeader)) / (isXSDT ? 8 : 4);
     for (size_t i = 0; i < entries_cnt; i++) {
         physaddr_t header_physical = rsdt->PointerToOtherSDT[i];
+        if (!header_physical)
+            continue;
         ACPISDTHeader *header = mmio_map_region(header_physical, sizeof(ACPISDTHeader));
         /* Remap using actual size */
         header = mmio_map_region(header_physical, header->Length);
@@ -194,7 +199,7 @@ get_hpet(void) {
 HPETRegister *
 hpet_register(void) {
     HPET *hpet_timer = get_hpet();
-    if (!hpet_timer->address.address) panic("hpet is unavailable\n");
+    if (!hpet_timer || !hpet_timer->address.address) panic("hpet is unavailable\n");
 
     uintptr_t paddr = hpet_timer->address.address;
     return mmio_map_region(paddr, sizeof(HPETRegister));
@@ -204,6 +209,7 @@ hpet_register(void) {
 void
 hpet_print_struct(void) {
     HPET *hpet = get_hpet();
+    assert(hpet != NULL);
     cprintf("signature = %s\n", (hpet->h).Signature);
     cprintf("length = %08x\n", (hpet->h).Length);
     cprintf("revision = %08x\n", (hpet->h).Revision);

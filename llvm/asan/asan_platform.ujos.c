@@ -32,9 +32,6 @@
 /* FIXME: We need to wrap all the custom allocators we use and track the allocated memory. */
 /* There should probably be more of them (especially in the kernel). */
 
-extern uint8_t __gcc_except_table_start;
-extern uint8_t __gcc_except_table_end;
-
 extern uint8_t __data_start;
 extern uint8_t __data_end;
 
@@ -57,9 +54,7 @@ platform_abort() {
 }
 
 #if LAB > 8
-
 #define SHADOW_STEP 8192
-
 /*
  * Allocate memory for shadow memory if utf->utf_fault_va
  * is inside shadow memory (but not for shadow memory describing itself)
@@ -67,11 +62,12 @@ platform_abort() {
  *  and sys_alloc_region to allocate region filled with 0xFF -- ALLOC_ONE)
  * Returns one if allocated something to stop chaining user PF handlers
  */
-
 static bool
 asan_shadow_allocator(struct UTrapframe *utf) {
     // LAB 9: Your code here
-    (void)utf;
+    if (!SHADOW_ADDRESS_VALID(utf->utf_fault_va))
+        return 0;
+    sys_alloc_region(0, ROUNDDOWN((void *)utf->utf_fault_va, PAGE_SIZE), PAGE_SIZE, ALLOC_ONE | PROT_R | PROT_W);
     return 1;
 }
 #endif
@@ -85,16 +81,6 @@ asan_shadow_allocator(struct UTrapframe *utf) {
 #define SANITIZE_USER_VPT_SHADOW_BASE (ROUNDDOWN(UVPT >> 3, PAGE_SIZE) + SANITIZE_USER_SHADOW_OFF)
 #define SANITIZE_USER_VPT_SHADOW_SIZE (ROUNDUP((UVPML4 + HUGE_PAGE_SIZE) >> 3, PAGE_SIZE) + SANITIZE_USER_SHADOW_OFF - SANITIZE_USER_VPT_SHADOW_BASE)
 
-void
-platform_asan_unpoison(void *addr, size_t size) {
-    asan_internal_fill_range((uptr)addr, size, 0);
-}
-
-void
-platform_asan_poison(void *addr, size_t size) {
-    asan_internal_fill_range((uptr)addr, size, ASAN_GLOBAL_RZ);
-}
-
 static int
 asan_unpoison_shared_region(void *start, void *end, void *arg) {
     (void)start, (void)end, (void)arg;
@@ -104,7 +90,8 @@ asan_unpoison_shared_region(void *start, void *end, void *arg) {
 }
 
 void
-platform_asan_init(void) {
+platform_asan_init() {
+
     asan_internal_shadow_start = (uint8_t *)SANITIZE_USER_SHADOW_BASE;
     asan_internal_shadow_end = (uint8_t *)SANITIZE_USER_SHADOW_BASE + SANITIZE_USER_SHADOW_SIZE;
     asan_internal_shadow_off = (uint8_t *)SANITIZE_USER_SHADOW_OFF;
@@ -118,31 +105,40 @@ platform_asan_init(void) {
 
     /* 1. Program segments (text, data, rodata, bss) */
     // LAB 8: Your code here
+    // platform_asan_unpoison args: (address, size)
     platform_asan_unpoison(&__text_start, &__text_end - &__text_start);
-
     platform_asan_unpoison(&__data_start, &__data_end - &__data_start);
     platform_asan_unpoison(&__rodata_start, &__rodata_end - &__rodata_start);
     platform_asan_unpoison(&__bss_start, &__bss_end - &__bss_start);
-
-    platform_asan_unpoison(&__gcc_except_table_start, &__gcc_except_table_end - &__gcc_except_table_start);
-
 
     /* 2. Stacks (USER_EXCEPTION_STACK_TOP, USER_STACK_TOP) */
     // LAB 8: Your code here
     platform_asan_unpoison((void *)(USER_EXCEPTION_STACK_TOP - USER_EXCEPTION_STACK_SIZE), USER_EXCEPTION_STACK_SIZE);
     platform_asan_unpoison((void *)(USER_STACK_TOP - USER_STACK_SIZE), USER_STACK_SIZE);
+
     /* 3. Kernel exposed info (UENVS, UVSYS (only for lab 12)) */
     // LAB 8: Your code here
     platform_asan_unpoison((void *)UENVS, UENVS_SIZE);
-    // TODO NOTE: LAB 12 code may be here
+
 #if LAB >= 12
-    platform_asan_unpoison((void *)UVSYS, NVSYSCALLS * sizeof(int));
+    platform_asan_unpoison((uptr)UVSYS, NVSYSCALLS * sizeof(int));
 #endif
 
-    /* 4. Shared pages */
-#if LAB >= 11
-    foreach_shared_region(asan_unpoison_shared_region, NULL);
-#endif
+    /* 4. Shared pages
+     * HINT: Use foreach_shared_region() with asan_unpoison_shared_region() */
+    // LAB 8: Your code here
+    foreach_shared_region(asan_unpoison_shared_region, 0);
+}
+
+
+void
+platform_asan_unpoison(void *addr, size_t size) {
+    asan_internal_fill_range((uptr)addr, size, 0);
+}
+
+void
+platform_asan_poison(void *addr, size_t size) {
+    asan_internal_fill_range((uptr)addr, size, ASAN_GLOBAL_RZ);
 }
 
 void

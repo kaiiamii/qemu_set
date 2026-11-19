@@ -28,8 +28,8 @@ void __nosan_memmove(void *, void *, size_t);
 #define nosan_memcpy  __nosan_memcpy
 #define nosan_memset  __nosan_memset
 #else
-#define nosan_memcpy  memcpy
-#define nosan_memset  memset
+#define nosan_memcpy memcpy
+#define nosan_memset memset
 #define nosan_memmove memmove
 #endif
 
@@ -47,20 +47,17 @@ void __nosan_memmove(void *, void *, size_t);
 /* map_region() source override flags */
 #define ALLOC_ZERO 0x100000 /* Allocate memory filled with 0x00 */
 #define ALLOC_ONE  0x200000 /* Allocate memory filled with 0xFF */
-/* map_physical_region() behaviour flags */
-#define MAP_USER_MMIO 0x400000 /* Disallow multiple use and be stricter */
 
 /* Memory protection flags & attributes */
 #define PROT_X       0x1 /* Executable */
 #define PROT_W       0x2 /* Writable */
 #define PROT_R       0x4 /* Readable (mostly ignored) */
 #define PROT_RWX     0x7
-#define PROT_WT      0x8   /* Write-through */
-#define PROT_WC      0x10  /* Cache disable (Upgradable to Write-combining via MTRRs) */
-#define PROT_CD      0x18  /* Cache disable */
-#define PROT_USER_   0x20  /* User-accessible */
-#define PROT_SHARE   0x40  /* Shared copy flag */
-#define PROT_LAZY    0x80  /* Copy-on-Write flag */
+#define PROT_WC      0x8 /* Write-combining */
+#define PROT_CD      0x18 /* Cache disable */
+#define PROT_USER_   0x20 /* User-accessible */
+#define PROT_SHARE   0x40 /* Shared copy flag */
+#define PROT_LAZY    0x80 /* Copy-on-Write flag */
 #define PROT_COMBINE 0x100 /* Combine old and new priviliges */
 #define PROT_AVAIL   0xA00 /* Free-to-use flags, available for applications */
 /* (mapped directly to page table unused flags) */
@@ -106,7 +103,6 @@ struct PagePool {
 };
 
 int map_region(struct AddressSpace *dspace, uintptr_t dst, struct AddressSpace *sspace, uintptr_t src, uintptr_t size, int flags);
-int map_physical_region(struct AddressSpace *dst, uintptr_t dstart, uintptr_t pstart, size_t size, int flags);
 void unmap_region(struct AddressSpace *dspace, uintptr_t dst, uintptr_t size);
 void init_memory(void);
 void release_address_space(struct AddressSpace *space);

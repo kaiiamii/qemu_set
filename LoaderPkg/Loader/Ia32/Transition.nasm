@@ -4,7 +4,7 @@
 
 bits 32
 
-SECTION .data
+SECTION .text
     align 4
 
 %macro GDT_DESC 2
@@ -36,8 +36,6 @@ LOADER_PARAMS:
     
 PAGE_TABLE:
     dd 0
-
-SECTION .text
 
 global ASM_PFX(IsCpuidSupportedAsm)
 ASM_PFX(IsCpuidSupportedAsm):
@@ -106,10 +104,10 @@ AsmWithOurGdt:
 
     ; 3. Reset all the data segment registers to linear mode (LINEAR_DATA_SEL).
     ; LAB 2: Your code here:
-    mov ax, LINEAR_DATA_SEL
+    mov eax, LINEAR_DATA_SEL
     mov ds, ax
-    mov es, ax
     mov ss, ax
+    mov es, ax
     mov fs, ax
     mov gs, ax
 
@@ -117,10 +115,11 @@ AsmWithOurGdt:
     ; This may already be enabled by the firmware but is not guaranteed.
     ; LAB 2: Your code here:
     mov eax, cr4
-    or eax, (1 << 5) | (1 << 7)
+    or eax, 1 << 5
+    or eax, 1 << 7
     mov cr4, eax
 
-    ; 5. Update page table address register (CR3) right away with the supplied PAGE_TABLE.
+    ; 5. Update page table address register (C3) right away with the supplied PAGE_TABLE.
     ; This does nothing as paging is off at the moment as paging is disabled.
     ; LAB 2: Your code here:
     mov eax, [PAGE_TABLE]
@@ -130,7 +129,8 @@ AsmWithOurGdt:
     ; LAB 2: Your code here:
     mov ecx, 0xC0000080
     rdmsr
-    or eax, (1 << 8) | (1 << 11)
+    or eax, 1 << 8
+    or eax, 1 << 11
     wrmsr
 
     ; 7. Enable paging as it is required in 64-bit mode.
@@ -144,7 +144,7 @@ AsmWithOurGdt:
 
     ; 8. Transition to 64-bit mode by updating CS with LINEAR_CODE64_SEL.
     ; LAB 2: Your code here:
-    jmp DWORD LINEAR_CODE64_SEL:AsmInLongMode
+    jmp LINEAR_CODE64_SEL:AsmInLongMode
 
 AsmInLongMode:
     BITS 64
